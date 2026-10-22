@@ -1,0 +1,55 @@
+name: Package Minecraft
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Minecraft version to package
+        default: '1.8.9'
+        required: true
+      include_java:
+        description: Bundle a portable Java 8 runtime
+        type: boolean
+        default: true
+
+jobs:
+  package:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    env:
+      VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        if: ${{ inputs.include_java }}
+        with:
+          distribution: temurin
+          java-version: '8'
+
+      - name: Stage launcher and tools
+        run: |
+          mkdir -p package/Minecraft/tools
+          cp mclauncher-tui.sh package/
+          curl -fsSL -o package/Minecraft/tools/jq.exe \
+            https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-windows-amd64.exe
+
+      - name: Install ${{ inputs.version }}
+        run: bash package/mclauncher-tui.sh --install "$VERSION" "$PWD/package/Minecraft"
+
+      - name: Bundle Java 8
+        if: ${{ inputs.include_java }}
+        run: cp -r "$(cygpath -u "$JAVA_HOME")" package/Minecraft/java
+
+      - name: Clean up
+        run: |
+          find package -name '*.download' -delete
+          du -sh package
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: minecraft-${{ inputs.version }}
+          path: package
+          if-no-files-found: error
