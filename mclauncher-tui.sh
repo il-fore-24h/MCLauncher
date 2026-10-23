@@ -756,10 +756,14 @@ start_game() {
     if [[ -n $CFG_extraJvm ]]; then read -ra w <<< "$CFG_extraJvm"; jvm+=("${w[@]}"); fi
 
     if [[ $(jqx -r 'has("arguments")' "$resolved") == true ]]; then
-        expand_stream < <(jqx -r -f "$JQDIR/args.jq" --arg sel jvm  --arg qp "$qp" "$resolved")
-        jvm+=("${CLEAN[@]}")
-        expand_stream < <(jqx -r -f "$JQDIR/args.jq" --arg sel game --arg qp "$qp" "$resolved")
-        gamel=("${CLEAN[@]}")
+        local sel_name
+        for sel_name in jvm game; do
+            jqx -r -f "$JQDIR/args.jq" --arg sel "$sel_name" --arg qp "$qp" \
+                --arg arch "$ARCH" --arg osver "$OSVER" "$resolved" > "$TMPD/args.$sel_name" \
+                || die "Cannot read $sel_name arguments for $id"
+            expand_stream < "$TMPD/args.$sel_name"
+            if [[ $sel_name == jvm ]]; then jvm+=("${CLEAN[@]}"); else gamel=("${CLEAN[@]}"); fi
+        done
     else
         # Legacy format (before 1.13): LWJGL 2, classpath and natives passed manually
         jvm+=("-Djava.library.path=$ROOTM/versions/$id/natives" "-Dorg.lwjgl.librarypath=$ROOTM/versions/$id/natives" -cp "$CLASSPATH")
