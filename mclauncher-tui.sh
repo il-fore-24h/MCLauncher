@@ -128,6 +128,8 @@ EOF
     { printf '%s\n' "$RULES_DEF"; cat <<'EOF'
 .libraries[]
 | select(.rules | rules_ok({}))
+| select(((.name // "") | test("natives-windows-arm64$")) == false or $arch == "arm64")
+| select(((.name // "") | test("natives-windows-x86$")) == false or $arch == "x86")
 | . as $lib
 | (.downloads // null) as $dl
 | (
@@ -444,7 +446,15 @@ test_installed() {
     jid=$(jar_id_of "$id") || return 1
     [[ -f $VERSIONS/$jid/$jid.jar ]] || return 1
     [[ -d $VERSIONS/$id/natives ]] || return 1
-    compgen -G "$VERSIONS/$id/natives/*.dll" >/dev/null
+    compgen -G "$VERSIONS/$id/natives/*.dll" >/dev/null && return 0
+    # No extracted DLLs: fine for 1.19+, where LWJGL loads natives from the classpath JARs.
+    # Only versions with classifier-style natives (<= 1.18) need them in the natives folder.
+    local tmp; tmp=$(mktemp "$TMPD/ti.XXXXXX")
+    resolve_json "$id" "$tmp" || { rm -f "$tmp"; return 1; }
+    jqx -e '[.libraries[] | select(.natives.windows != null)] | length == 0' "$tmp" >/dev/null 2>&1
+    local rc=$?
+    rm -f "$tmp"
+    return $rc
 }
 
 # Fills ENT_ID / ENT_TYPE / ENT_INST (1/0)
@@ -603,6 +613,9 @@ install_version() {
         write_bar Libraries "$i" "$total"
     done
     printf '\n'
+    local ndll=0 f
+    for f in "$nat"/*.dll; do [[ -f $f ]] && ndll=$(( ndll + 1 )); done
+    printf '  [%s] natives: %d DLL extracted\n' "$id" "$ndll"
 
     game_dir_of "$id"
     mkdir -p "$GAMEDIR"
