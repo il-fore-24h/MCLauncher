@@ -12,6 +12,9 @@ on:
         type: boolean
         default: true
 
+permissions:
+  contents: write
+
 jobs:
   package:
     runs-on: windows-latest
@@ -20,6 +23,7 @@ jobs:
         shell: bash
     env:
       VERSION: ${{ inputs.version }}
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
 
@@ -52,13 +56,20 @@ jobs:
         if: ${{ inputs.include_java }}
         run: cp -r "$(cygpath -u "$JAVA_HOME")" package/Minecraft/java
 
-      - name: Clean up
+      - name: Create zip
         run: |
           find package -name '*.download' -delete
-          du -sh package
+          (cd package && 7z a -tzip -mx=5 "../minecraft-$VERSION.zip" . > /dev/null)
+          ls -lh "minecraft-$VERSION.zip"
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: minecraft-${{ inputs.version }}
-          path: package
-          if-no-files-found: error
+      - name: Publish release
+        run: |
+          tag="minecraft-$VERSION"
+          zip="minecraft-$VERSION.zip"
+          if gh release view "$tag" > /dev/null 2>&1; then
+            gh release upload "$tag" "$zip" --clobber
+          else
+            gh release create "$tag" "$zip" \
+              --title "Minecraft $VERSION" \
+              --notes "Minecraft $VERSION con launcher Git Bash. Estrai lo zip e leggi il README."
+          fi
