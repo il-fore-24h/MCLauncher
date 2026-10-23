@@ -103,12 +103,11 @@ jobs:
 
           loader=$(curl -fsSL -A "$UA" "https://meta.fabricmc.net/v2/versions/loader/$VERSION" \
             | jq -r '[.[] | select(.loader.stable)][0].loader.version // empty')
-          installer=$(curl -fsSL -A "$UA" "https://meta.fabricmc.net/v2/versions/installer" \
-            | jq -r '[.[] | select(.stable)][0].version // empty')
-          [ -n "$loader" ] && [ -n "$installer" ] || { echo "No stable Fabric loader for $VERSION"; exit 1; }
+          [ -n "$loader" ] || { echo "No stable Fabric loader for $VERSION"; exit 1; }
+          echo "Fabric loader $loader"
 
           curl -fsSL -A "$UA" -o profile.json \
-            "https://meta.fabricmc.net/v2/versions/loader/$VERSION/$loader/$installer/profile/json"
+            "https://meta.fabricmc.net/v2/versions/loader/$VERSION/$loader/profile/json"
           id=$(jq -r '.id' profile.json)
           mkdir -p "package/Minecraft/versions/$id"
           mv profile.json "package/Minecraft/versions/$id/$id.json"
