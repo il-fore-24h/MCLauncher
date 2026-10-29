@@ -1,0 +1,41 @@
+
+name: Download Forge Config API Port 21.0.5
+
+on:
+  workflow_dispatch:
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Find and download matching Forge JAR
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          API="https://api.modrinth.com/v2/project/ohNO6lps/version"
+          curl -fsSL "$API" -o versions.json
+
+          URL=$(jq -r '
+            .[]
+            | select(.version_number == "21.0.5")
+            | select(any(.game_versions[]; . == "1.21.1"))
+            | select(any(.loaders[]; . == "forge"))
+            | .files[]
+            | select(.filename | endswith(".jar"))
+            | .url
+          ' versions.json | head -n 1)
+
+          if [ -z "$URL" ]; then
+            echo "Version 21.0.5 for Minecraft 1.21.1 Forge not found."
+            exit 1
+          fi
+
+          mkdir -p downloads
+          curl -fL "$URL" -o downloads/ForgeConfigAPIPort.jar
+
+      - name: Upload download
+        uses: actions/upload-artifact@v4
+        with:
+          name: ForgeConfigAPIPort-MC-1.21.1
+          path: downloads/*.jar
