@@ -1,41 +1,66 @@
 
-name: Download Forge Config API Port 21.0.5
+name: Download Mods - Minecraft 1.21.1 Fabric
 
 on:
   workflow_dispatch:
 
 jobs:
-  download:
+  download-mods:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Find and download matching Forge JAR
+      - name: Install tools
+        run: sudo apt-get update && sudo apt-get install -y jq curl
+
+      - name: Download compatible mods
         shell: bash
         run: |
           set -euo pipefail
+          mkdir -p mods
 
-          API="https://api.modrinth.com/v2/project/ohNO6lps/version"
-          curl -fsSL "$API" -o versions.json
+          download_mod() {
+            local project="$1"
+            local name="$2"
 
-          URL=$(jq -r '
-            .[]
-            | select(.version_number == "21.0.5")
-            | select(any(.game_versions[]; . == "1.21.1"))
-            | select(any(.loaders[]; . == "forge"))
-            | .files[]
-            | select(.filename | endswith(".jar"))
-            | .url
-          ' versions.json | head -n 1)
+            echo "Searching compatible versions for $name..."
 
-          if [ -z "$URL" ]; then
-            echo "Version 21.0.5 for Minecraft 1.21.1 Forge not found."
-            exit 1
-          fi
+            curl -fsSL \
+              "https://api.modrinth.com/v2/project/${project}/version" \
+              -o versions.json
 
-          mkdir -p downloads
-          curl -fL "$URL" -o downloads/ForgeConfigAPIPort.jar
+            local url
+            url=$(jq -r '
+              [
+                .[]
+                | select(any(.game_versions[]?; . == "1.21.1"))
+                | select(any(.loaders[]?; . == "fabric"))
+                | .files[]
+                | select(.filename | endswith(".jar"))
+              ]
+              | sort_by(.date_published)
+              | last
+              | .url // empty
+            ' versions.json)
 
-      - name: Upload download
+            if [ -z "$url" ]; then
+              echo "::error::No compatible Fabric version found for $name"
+              exit 1
+            fi
+
+            curl -fL "$url" -o "mods/${name}.jar"
+            echo "Downloaded $name"
+          }
+
+          # Forge Config API Port
+          download_mod "forge-config-api-port" \
+            "ForgeConfigAPIPort"
+
+          # Fabric API
+          download_mod "fabric-api" "FabricAPI"
+
+      - name: Upload mods
         uses: actions/upload-artifact@v4
         with:
-          name: ForgeConfigAPIPort-MC-1.21.1
-          path: downloads/*.jar
+          name: Minecraft-1.21.1-Fabric-Mods
+          path: mods/*.jar
+          if-no-files-found: error
