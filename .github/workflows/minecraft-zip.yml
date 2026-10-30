@@ -1,3 +1,4 @@
+
 name: Package Minecraft
 
 on:
@@ -7,12 +8,24 @@ on:
         description: 'Minecraft versions, comma separated (e.g. 1.21.1,1.20.1,1.8.9)'
         default: '1.21.1'
         required: true
+
+      loader:
+        description: Mod loader to install
+        type: choice
+        options:
+          - none
+          - fabric
+          - neoforge
+        default: fabric
+        required: true
+
       include_java:
         description: Bundle the Java runtime required by each version
         type: boolean
         default: true
+
       sodium:
-        description: Add Fabric + Sodium where Sodium exists (others are packaged without it)
+        description: Install Sodium on Fabric where available
         type: boolean
         default: true
 
@@ -24,139 +37,485 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       versions: ${{ steps.list.outputs.versions }}
+
     steps:
       - id: list
         env:
           INPUT_VERSIONS: ${{ inputs.versions }}
         run: |
           list=$(jq -Rc 'split(",") | map(gsub("\\s"; "")) | map(select(length > 0))' <<< "$INPUT_VERSIONS")
+
+          if [ "$list" = "[]" ]; then
+            echo "::error::No Minecraft versions specified"
+            exit 1
+          fi
+
           echo "versions=$list" >> "$GITHUB_OUTPUT"
           echo "Building: $list"
 
   package:
     needs: prepare
     runs-on: windows-latest
+
     strategy:
       fail-fast: false
       matrix:
         version: ${{ fromJSON(needs.prepare.outputs.versions) }}
+
     defaults:
       run:
         shell: bash
+
     env:
       VERSION: ${{ matrix.version }}
       GH_TOKEN: ${{ github.token }}
       UA: github-actions-minecraft-package/1.0
+
     steps:
       - uses: actions/checkout@v4
+
+      # --------------------------------------------------
+      # Prepare package
+      # --------------------------------------------------
 
       - name: Stage launcher and tools
         run: |
           mkdir -p package/Minecraft/tools
+
           cp mclauncher-tui.sh package/
           cp README.md package/
+
           curl -fsSL -o package/Minecraft/tools/jq.exe \
             https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-windows-amd64.exe
 
-      - name: Install ${{ matrix.version }}
-        run: bash package/mclauncher-tui.sh --install "$VERSION" "$PWD/package/Minecraft"
+      # --------------------------------------------------
+      # Install vanilla Minecraft
+      # --------------------------------------------------
+
+      - name: Install Minecraft ${{ matrix.version }}
+        run: |
+          bash package/mclauncher-tui.sh \
+            --install "$VERSION" "$PWD/package/Minecraft"
+
+      # --------------------------------------------------
+      # Detect and install Java
+      # --------------------------------------------------
 
       - name: Detect required Java
         id: java
-        if: ${{ inputs.include_java }}
         run: |
-          jq() { "$PWD/package/Minecraft/tools/jq.exe" "$@" | tr -d '\r'; }
-          major=$(jq -r '.javaVersion.majorVersion // 8' "package/Minecraft/versions/$VERSION/$VERSION.json")
-          echo "$VERSION needs Java $major"
+          jq() {
+            "$PWD/package/Minecraft/tools/jq.exe" "$@" | tr -d '\r'
+          }
+
+          major=$(jq -r \
+            '.javaVersion.majorVersion // 8' \
+            "package/Minecraft/versions/$VERSION/$VERSION.json")
+
+          if ! [[ "$major" =~ ^[0-9]+$ ]]; then
+            echo "::error::Invalid Java version: $major"
+            exit 1
+          fi
+
+          echo "$VERSION requires Java $major"
+
           echo "major=$major" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-java@v4
-        if: ${{ inputs.include_java }}
         with:
           distribution: temurin
           java-version: ${{ steps.java.outputs.major }}
 
       - name: Bundle Java
         if: ${{ inputs.include_java }}
-        run: cp -r "$(cygpath -u "$JAVA_HOME")" package/Minecraft/java
+        run: |
+          cp -r "$(cygpath -u "$JAVA_HOME")" \
+            package/Minecraft/java
+
+      # ==================================================
+      # FABRIC + SODIUM
+      # ==================================================
 
       - name: Check Sodium availability
         id: sodium
-        if: ${{ inputs.sodium }}
+        if: ${{ inputs.loader == 'fabric' && inputs.sodium }}
         run: |
-          jq() { "$PWD/package/Minecraft/tools/jq.exe" "$@" | tr -d '\r'; }
-          mods=$(curl -fsSL -A "$UA" -G "https://api.modrinth.com/v2/project/sodium/version" \
-                   --data-urlencode "game_versions=[\"$VERSION\"]" \
-                   --data-urlencode 'loaders=["fabric"]' | jq 'length')
-          fabric=$(curl -fsSL -A "$UA" "https://meta.fabricmc.net/v2/versions/loader/$VERSION" | jq 'length')
+          jq() {
+            "$PWD/package/Minecraft/tools/jq.exe" "$@" | tr -d '\r'
+          }
+
+          mods=$(curl -fsSL -A "$UA" -G \
+            "https://api.modrinth.com/v2/project/sodium/version" \
+            --data-urlencode "game_versions=[\"$VERSION\"]" \
+            --data-urlencode 'loaders=["fabric"]' |
+            jq 'length')
+
+          fabric=$(curl -fsSL -A "$UA" \
+            "https://meta.fabricmc.net/v2/versions/loader/$VERSION" |
+            jq 'length')
+
           if [ "${mods:-0}" -gt 0 ] && [ "${fabric:-0}" -gt 0 ]; then
             echo "ok=true" >> "$GITHUB_OUTPUT"
+            echo "Sodium available for $VERSION"
           else
-            echo "::warning::No Fabric/Sodium build for $VERSION - packaging without Sodium"
+            echo "::warning::No Fabric/Sodium build for $VERSION"
             echo "ok=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Add Fabric and Sodium
-        if: ${{ steps.sodium.outputs.ok == 'true' }}
+        if: ${{ inputs.loader == 'fabric' }}
+        env:
+          SODIUM_OK: ${{ steps.sodium.outputs.ok }}
         run: |
-          jq() { "$PWD/package/Minecraft/tools/jq.exe" "$@" | tr -d '\r'; }
+          jq() {
+            "$PWD/package/Minecraft/tools/jq.exe" "$@" | tr -d '\r'
+          }
 
-          loader=$(curl -fsSL -A "$UA" "https://meta.fabricmc.net/v2/versions/loader/$VERSION" \
-            | jq -r '[.[] | select(.loader.stable)][0].loader.version // empty')
-          [ -n "$loader" ] || { echo "No stable Fabric loader for $VERSION"; exit 1; }
-          echo "Fabric loader $loader"
+          # Get latest stable Fabric loader
+
+          loader=$(curl -fsSL -A "$UA" \
+            "https://meta.fabricmc.net/v2/versions/loader/$VERSION" |
+            jq -r '[.[] | select(.loader.stable)][0].loader.version // empty')
+
+          [ -n "$loader" ] || {
+            echo "::error::No stable Fabric loader for $VERSION"
+            exit 1
+          }
+
+          echo "Fabric loader: $loader"
+
+          # Download Fabric profile
 
           curl -fsSL -A "$UA" -o profile.json \
             "https://meta.fabricmc.net/v2/versions/loader/$VERSION/$loader/profile/json"
+
           id=$(jq -r '.id' profile.json)
+
           mkdir -p "package/Minecraft/versions/$id"
-          mv profile.json "package/Minecraft/versions/$id/$id.json"
+
+          mv profile.json \
+            "package/Minecraft/versions/$id/$id.json"
+
           echo "Fabric profile: $id"
 
-          # Installs the Fabric profile (parent version is already there) and makes it the default
-          bash package/mclauncher-tui.sh --install "$id" "$PWD/package/Minecraft"
+          # Register Fabric with the custom launcher
+          bash package/mclauncher-tui.sh \
+            --install "$id" "$PWD/package/Minecraft"
 
-          mods="package/Minecraft/instances/$id/mods"
-          mkdir -p "$mods"
+          # Download Sodium and its required dependencies
 
-          # Downloads the newest release of a Modrinth project for $VERSION on Fabric,
-          # verifies its SHA-512, and prints the project's required dependencies.
-          fetch_mod() {
-            local v url sha
-            v=$(curl -fsSL -A "$UA" -G "https://api.modrinth.com/v2/project/$1/version" \
-                  --data-urlencode "game_versions=[\"$VERSION\"]" \
-                  --data-urlencode 'loaders=["fabric"]' \
-                | jq -c '([.[] | select(.version_type == "release")] + .)[0]')
-            if [ -z "$v" ] || [ "$v" = null ]; then echo "No Fabric build of $1 for $VERSION" >&2; return 1; fi
-            url=$(jq -r '.files | (map(select(.primary))[0] // .[0]).url' <<< "$v")
-            sha=$(jq -r '.files | (map(select(.primary))[0] // .[0]).hashes.sha512' <<< "$v")
-            curl -fsSL -A "$UA" -o "$mods/${url##*/}" "$url"
-            [ "$(sha512sum "$mods/${url##*/}" | cut -d' ' -f1)" = "$sha" ] || { echo "Hash mismatch for ${url##*/}" >&2; return 1; }
-            echo "Added ${url##*/}" >&2
-            jq -r '.dependencies[] | select(.dependency_type == "required" and .project_id != null) | .project_id' <<< "$v"
+          if [ "$SODIUM_OK" = "true" ]; then
+
+            mods="package/Minecraft/instances/$id/mods"
+            mkdir -p "$mods"
+
+            fetch_mod() {
+              local v url sha filename actual
+
+              v=$(curl -fsSL -A "$UA" -G \
+                "https://api.modrinth.com/v2/project/$1/version" \
+                --data-urlencode "game_versions=[\"$VERSION\"]" \
+                --data-urlencode 'loaders=["fabric"]' |
+                jq -c '([.[] | select(.version_type == "release")] + .)[0]')
+
+              if [ -z "$v" ] || [ "$v" = "null" ]; then
+                echo "No Fabric build of $1 for $VERSION" >&2
+                return 1
+              fi
+
+              url=$(jq -r \
+                '.files | (map(select(.primary))[0] // .[0]).url' \
+                <<< "$v")
+
+              sha=$(jq -r \
+                '.files | (map(select(.primary))[0] // .[0]).hashes.sha512' \
+                <<< "$v")
+
+              filename="${url##*/}"
+
+              curl -fsSL -A "$UA" \
+                -o "$mods/$filename" "$url"
+
+              actual=$(sha512sum "$mods/$filename" | cut -d' ' -f1)
+
+              [ "$actual" = "$sha" ] || {
+                echo "::error::Hash mismatch for $filename"
+                return 1
+              }
+
+              echo "Added $filename" >&2
+
+              jq -r '
+                .dependencies[]
+                | select(
+                    .dependency_type == "required"
+                    and .project_id != null
+                  )
+                | .project_id
+              ' <<< "$v"
+            }
+
+            deps=$(fetch_mod sodium)
+
+            while IFS= read -r dep; do
+              [ -n "$dep" ] || continue
+              fetch_mod "$dep" > /dev/null
+            done <<< "$deps"
+
+            echo "Sodium and dependencies installed"
+
+          else
+            echo "Installing Fabric without Sodium"
+          fi
+
+      # ==================================================
+      # NEOFORGE
+      # ==================================================
+
+      - name: Add NeoForge
+        if: ${{ inputs.loader == 'neoforge' }}
+        run: |
+          jq() {
+            "$PWD/package/Minecraft/tools/jq.exe" "$@" | tr -d '\r'
           }
 
-          for dep in $(fetch_mod sodium); do fetch_mod "$dep" > /dev/null; done
-          ls -l "$mods"
+          mcdir="$PWD/package/Minecraft"
+
+          # Minecraft 1.20.1 uses the legacy NeoForge artifact.
+          # Other versions use the neoforge artifact.
+
+          if [ "$VERSION" = "1.20.1" ]; then
+            artifact="forge"
+            prefix="1.20.1-"
+          else
+            artifact="neoforge"
+
+            IFS='.' read -r p1 p2 p3 _ <<< "$VERSION"
+
+            if [ "$p1" = "1" ]; then
+              prefix="${p2}.${p3:-0}."
+            else
+              prefix="${p1}.${p2}."
+            fi
+          fi
+
+          echo "Minecraft version: $VERSION"
+          echo "NeoForge artifact: $artifact"
+          echo "NeoForge version prefix: $prefix"
+
+          # Download Maven metadata
+
+          metadata="neoforge-metadata.xml"
+
+          curl -fsSL -A "$UA" \
+            "https://maven.neoforged.net/releases/net/neoforged/$artifact/maven-metadata.xml" \
+            -o "$metadata"
+
+          # Select the newest compatible stable version.
+          # If only prereleases exist, use the newest available one.
+
+          neoforge_version=$(python - "$prefix" "$metadata" <<'PY'
+          import sys
+          import re
+          import xml.etree.ElementTree as ET
+
+          prefix = sys.argv[1]
+          metadata = sys.argv[2]
+
+          root = ET.parse(metadata).getroot()
+
+          versions = [
+              node.text.strip()
+              for node in root.findall(".//version")
+              if node.text and node.text.strip().startswith(prefix)
+          ]
+
+          if not versions:
+              print(
+                  f"No NeoForge version found for prefix {prefix}",
+                  file=sys.stderr
+              )
+              sys.exit(1)
+
+          def version_key(value):
+              parts = re.split(r"([0-9]+)", value)
+
+              return tuple(
+                  (0, int(part)) if part.isdigit()
+                  else (1, part.lower())
+                  for part in parts if part
+              )
+
+          stable = [
+              version for version in versions
+              if not re.search(
+                  r"(?i)(alpha|beta|rc|snapshot|pre)",
+                  version
+              )
+          ]
+
+          candidates = stable if stable else versions
+
+          print(max(candidates, key=version_key))
+          PY
+          )
+
+          [ -n "$neoforge_version" ] || {
+            echo "::error::Could not determine NeoForge version"
+            exit 1
+          }
+
+          echo "Selected NeoForge version: $neoforge_version"
+
+          # Download the client installer
+
+          installer="$artifact-$neoforge_version-installer.jar"
+
+          installer_url="https://maven.neoforged.net/releases/net/neoforged/$artifact/$neoforge_version/$installer"
+
+          curl -fsSL --retry 3 -A "$UA" \
+            -o "$installer" "$installer_url"
+
+          # NeoForge client installer expects launcher_profiles.json.
+          # Create a minimal one if this package does not have it.
+
+          if [ ! -f "$mcdir/launcher_profiles.json" ]; then
+            printf '{"profiles":{},"settings":{},"version":3}\n' \
+              > "$mcdir/launcher_profiles.json"
+          fi
+
+          # IMPORTANT: install the CLIENT, not the server.
+
+          java -jar "$installer" --installClient "$mcdir"
+
+          rm -f "$installer" "$metadata"
+
+          # Find the generated NeoForge version profile.
+
+          id=""
+
+          while IFS= read -r -d '' file; do
+
+            candidate=$(basename "$(dirname "$file")")
+
+            [ "$(basename "$file")" = "$candidate.json" ] || continue
+
+            if "$PWD/package/Minecraft/tools/jq.exe" \
+              -e --arg mc "$VERSION" \
+              '.inheritsFrom == $mc' "$file" >/dev/null 2>&1; then
+
+              id="$candidate"
+
+            fi
+
+          done < <(
+            find "$mcdir/versions" \
+              -mindepth 2 -maxdepth 2 \
+              -type f -name '*.json' -print0
+          )
+
+          [ -n "$id" ] || {
+            echo "::error::Could not find generated NeoForge profile"
+            exit 1
+          }
+
+          echo "NeoForge profile: $id"
+
+          # Register NeoForge with the custom launcher.
+          # The parent Minecraft version is already installed.
+
+          bash package/mclauncher-tui.sh \
+            --install "$id" "$mcdir"
+
+          # Create an isolated mods directory.
+
+          mkdir -p "$mcdir/instances/$id/mods"
+
+          echo "NeoForge client installation completed"
+
+      # ==================================================
+      # DETERMINE ARCHIVE NAME
+      # ==================================================
+
+      - name: Determine archive suffix
+        id: archive
+        env:
+          LOADER: ${{ inputs.loader }}
+          SODIUM_OK: ${{ steps.sodium.outputs.ok }}
+        run: |
+          case "$LOADER" in
+
+            neoforge)
+              suffix="-neoforge"
+              ;;
+
+            fabric)
+              if [ "$SODIUM_OK" = "true" ]; then
+                suffix="-sodium"
+              else
+                suffix="-fabric"
+              fi
+              ;;
+
+            none)
+              suffix=""
+              ;;
+
+            *)
+              echo "::error::Unknown loader: $LOADER"
+              exit 1
+              ;;
+
+          esac
+
+          echo "suffix=$suffix" >> "$GITHUB_OUTPUT"
+
+      # ==================================================
+      # CREATE ZIP
+      # ==================================================
 
       - name: Create zip
         env:
-          SUFFIX: ${{ steps.sodium.outputs.ok == 'true' && '-sodium' || '' }}
+          SUFFIX: ${{ steps.archive.outputs.suffix }}
         run: |
           find package -name '*.download' -delete
-          (cd package && 7z a -tzip -mx=5 "../minecraft-$VERSION$SUFFIX.zip" . > /dev/null)
-          ls -lh "minecraft-$VERSION$SUFFIX.zip"
+
+          zip="minecraft-$VERSION$SUFFIX.zip"
+
+          (cd package && 7z a -tzip -mx=5 "../$zip" . > /dev/null)
+
+          ls -lh "$zip"
+
+      # ==================================================
+      # PUBLISH RELEASE
+      # ==================================================
 
       - name: Publish release
         env:
-          SUFFIX: ${{ steps.sodium.outputs.ok == 'true' && '-sodium' || '' }}
+          SUFFIX: ${{ steps.archive.outputs.suffix }}
+          LOADER: ${{ inputs.loader }}
         run: |
           tag="minecraft-$VERSION"
           zip="minecraft-$VERSION$SUFFIX.zip"
+
+          notes="Minecraft $VERSION ($LOADER) con launcher Git Bash. Estrai lo zip e leggi il README."
+
+          if [ "$SUFFIX" = "-sodium" ]; then
+            notes="$notes Include Fabric e Sodium."
+          elif [ "$SUFFIX" = "-fabric" ]; then
+            notes="$notes Include Fabric senza Sodium."
+          elif [ "$SUFFIX" = "-neoforge" ]; then
+            notes="$notes Include NeoForge client."
+          fi
+
           if gh release view "$tag" > /dev/null 2>&1; then
+
             gh release upload "$tag" "$zip" --clobber
+
           else
+
             gh release create "$tag" "$zip" \
               --title "Minecraft $VERSION" \
-              --notes "Minecraft $VERSION con launcher Git Bash. Estrai lo zip e leggi il README. Lo zip con suffisso -sodium include Fabric e Sodium."
+              --notes "$notes"
+
           fi
